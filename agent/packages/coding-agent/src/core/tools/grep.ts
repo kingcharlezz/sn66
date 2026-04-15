@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Text } from "@mariozechner/pi-tui";
 import { type Static, Type } from "@sinclair/typebox";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { readFileSync, statSync } from "fs";
 import path from "path";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
@@ -168,12 +168,6 @@ export function createGrepToolDefinition(
 
 				(async () => {
 					try {
-						const rgPath = await ensureTool("rg", true);
-						if (!rgPath) {
-							settle(() => reject(new Error("ripgrep (rg) is not available and could not be downloaded")));
-							return;
-						}
-
 						const searchPath = resolveToCwd(searchDir || ".", cwd);
 						const ops = customOps ?? defaultGrepOperations;
 						let isDirectory: boolean;
@@ -210,6 +204,102 @@ export function createGrepToolDefinition(
 							}
 							return lines;
 						};
+
+						const rgPath = await ensureTool("rg", true);
+						if (!rgPath) {
+							const relativeSearchPath = path.relative(cwd, searchPath) || ".";
+							const fallbackArgs = [
+								"-R",
+								"-n",
+								"-I",
+								"--binary-files=without-match",
+								"--exclude-dir=node_modules",
+								"--exclude-dir=.git",
+							];
+							if (ignoreCase) fallbackArgs.push("-i");
+							if (literal) fallbackArgs.push("-F");
+							if (glob) fallbackArgs.push(`--include=${glob}`);
+							if (contextValue > 0) fallbackArgs.push("-C", String(contextValue));
+							fallbackArgs.push(pattern, relativeSearchPath);
+
+							const fallback = spawnSync("grep", fallbackArgs, {
+								cwd,
+								encoding: "utf-8",
+								maxBuffer: 10 * 1024 * 1024,
+							});
+							if (fallback.error) {
+								const errorMessage = fallback.error.message;
+								settle(() => reject(new Error(`Failed to run grep: ${errorMessage}`)));
+								return;
+							}
+
+							const stdout = fallback.stdout?.trimEnd() || "";
+							if (fallback.status !== 0 && fallback.status !== 1 && !stdout) {
+								const errorMsg = fallback.stderr?.trim() || `grep exited with code ${fallback.status}`;
+								settle(() => reject(new Error(errorMsg)));
+								return;
+							}
+							if (!stdout) {
+								settle(() =>
+									resolve({ content: [{ type: "text", text: "No matches found" }], details: undefined }),
+								);
+								return;
+							}
+
+							let matchCount = 0;
+							let matchLimitReached = false;
+							let linesTruncated = false;
+							const outputLines: string[] = [];
+							for (const rawLine of stdout.split("\n")) {
+								if (!rawLine.trim()) continue;
+								const parsed = rawLine.match(/^(.+?)([:|-])(\d+)([:|-])\s?(.*)$/);
+								let formattedLine = rawLine;
+								if (parsed) {
+									const [, filePath, sep1, lineNumber, sep2, text] = parsed;
+									if (sep1 === ":" && sep2 === ":") {
+										matchCount++;
+										if (matchCount > effectiveLimit) {
+											matchLimitReached = true;
+											break;
+										}
+									}
+									const absoluteFilePath = path.resolve(cwd, filePath);
+									const displayPath = formatPath(absoluteFilePath);
+									const { text: truncatedText, wasTruncated } = truncateLine(text);
+									if (wasTruncated) linesTruncated = true;
+									formattedLine = `${displayPath}${sep1}${lineNumber}${sep2}${text.length > 0 ? ` ${truncatedText}` : ""}`;
+								}
+								outputLines.push(formattedLine);
+							}
+
+							const rawOutput = outputLines.join("\n");
+							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+							let output = truncation.content;
+							const details: GrepToolDetails = {};
+							const notices: string[] = [];
+							if (matchLimitReached) {
+								notices.push(
+									`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+								);
+								details.matchLimitReached = effectiveLimit;
+							}
+							if (truncation.truncated) {
+								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+								details.truncation = truncation;
+							}
+							if (linesTruncated) {
+								notices.push(`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`);
+								details.linesTruncated = true;
+							}
+							if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+							settle(() =>
+								resolve({
+									content: [{ type: "text", text: output }],
+									details: Object.keys(details).length > 0 ? details : undefined,
+								}),
+							);
+							return;
+						}
 
 						const args: string[] = ["--json", "--line-number", "--color=never", "--hidden"];
 						if (ignoreCase) args.push("--ignore-case");

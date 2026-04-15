@@ -22,11 +22,6 @@ import {
 	createAgentSessionRuntime,
 } from "./core/agent-session-runtime.js";
 import { AuthStorage } from "./core/auth-storage.js";
-import {
-	buildCompetitionPrompt,
-	buildCompetitionSummary,
-	chooseCompetitionThinking,
-} from "./core/competition/index.js";
 import { exportFromFile } from "./core/export-html/index.js";
 import type { LoadExtensionsResult } from "./core/extensions/index.js";
 import { migrateKeybindingsConfigFile } from "./core/keybindings.js";
@@ -592,15 +587,18 @@ function buildSessionOptions(
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)
 
-	options.tools = [
-		allTools.read,
-		allTools.bash,
-		allTools.edit,
-		allTools.write,
-		allTools.grep,
-		allTools.find,
-		allTools.ls,
-	];
+	// Tools
+	if (parsed.noTools) {
+		// --no-tools: start with no built-in tools
+		// --tools can still add specific ones back
+		if (parsed.tools && parsed.tools.length > 0) {
+			options.tools = parsed.tools.map((name) => allTools[name]);
+		} else {
+			options.tools = [];
+		}
+	} else if (parsed.tools) {
+		options.tools = parsed.tools.map((name) => allTools[name]);
+	}
 
 	return { options, cliThinkingFromModel };
 }
@@ -662,6 +660,28 @@ async function handleConfigCommand(args: string[]): Promise<boolean> {
 	process.exit(0);
 }
 
+function applySolverModeDefaults(parsed: Args): void {
+	// Docker validator runs use: --mode json --no-session -p "<task prompt>".
+	// Keep this path deterministic and low-overhead by disabling optional resource
+	// systems unless explicitly requested.
+	const isSolverLikeRun = parsed.mode === "json" && parsed.noSession === true;
+	if (!isSolverLikeRun) {
+		return;
+	}
+	if (!parsed.extensions && !parsed.noExtensions) {
+		parsed.noExtensions = true;
+	}
+	if (!parsed.skills && !parsed.noSkills) {
+		parsed.noSkills = true;
+	}
+	if (!parsed.promptTemplates && !parsed.noPromptTemplates) {
+		parsed.noPromptTemplates = true;
+	}
+	if (!parsed.themes && !parsed.noThemes) {
+		parsed.noThemes = true;
+	}
+}
+
 export async function main(args: string[]) {
 	resetTimings();
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
@@ -680,6 +700,12 @@ export async function main(args: string[]) {
 
 	// First pass: parse args to get --extension paths
 	const firstPass = parseArgs(args);
+	applySolverModeDefaults(firstPass);
+	const solverLikeRun = firstPass.mode === "json" && firstPass.noSession === true;
+	if (solverLikeRun && !isTruthyEnvFlag(process.env.PI_OFFLINE)) {
+		process.env.PI_OFFLINE = "1";
+		process.env.PI_SKIP_VERSION_CHECK = "1";
+	}
 	time("parseArgs.firstPass");
 	const shouldTakeOverStdout = firstPass.mode !== undefined || firstPass.print || !process.stdin.isTTY;
 	if (shouldTakeOverStdout) {
@@ -743,6 +769,7 @@ export async function main(args: string[]) {
 
 	// Second pass: parse args with extension flags
 	const parsed = parseArgs(args, extensionFlags);
+	applySolverModeDefaults(parsed);
 	time("parseArgs.secondPass");
 
 	// Pass flag values to extensions via runtime
@@ -853,14 +880,6 @@ export async function main(args: string[]) {
 		sessionManager = SessionManager.open(selectedPath, effectiveSessionDir);
 	}
 
-	const competitionRepoDir = sessionManager?.getCwd() ?? cwd;
-	const competitionSummary = initialMessage
-		? await buildCompetitionSummary(initialMessage, competitionRepoDir)
-		: undefined;
-	const competitionInitialMessage =
-		initialMessage && competitionSummary ? buildCompetitionPrompt(initialMessage, competitionSummary) : initialMessage;
-	time("buildCompetitionSummary");
-
 	const { options: sessionOptions, cliThinkingFromModel } = buildSessionOptions(
 		parsed,
 		scopedModels,
@@ -868,8 +887,11 @@ export async function main(args: string[]) {
 		modelRegistry,
 		settingsManager,
 	);
-	if (competitionSummary && !parsed.thinking && !cliThinkingFromModel) {
-		sessionOptions.thinkingLevel = chooseCompetitionThinking(competitionSummary);
+
+	// Non-interactive solver runs should prefer deterministic, lower-latency behavior.
+	// If the user did not explicitly pick a thinking level, default to "off".
+	if (!isInteractive && parsed.thinking === undefined && !cliThinkingFromModel) {
+		sessionOptions.thinkingLevel = "off";
 	}
 
 	if (parsed.apiKey) {
@@ -934,7 +956,7 @@ export async function main(args: string[]) {
 		const interactiveMode = new InteractiveMode(runtimeHost, {
 			migratedProviders,
 			modelFallbackMessage,
-			initialMessage: competitionInitialMessage,
+			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
@@ -961,7 +983,7 @@ export async function main(args: string[]) {
 		const exitCode = await runPrintMode(runtimeHost, {
 			mode,
 			messages: parsed.messages,
-			initialMessage: competitionInitialMessage,
+			initialMessage,
 			initialImages,
 		});
 		stopThemeWatcher();

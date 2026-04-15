@@ -109,6 +109,30 @@ function formatFindResult(
 	return text;
 }
 
+function buildFindResponse(results: string[], effectiveLimit: number) {
+	const resultLimitReached = results.length >= effectiveLimit;
+	const rawOutput = results.join("\n");
+	const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+	let resultOutput = truncation.content;
+	const details: FindToolDetails = {};
+	const notices: string[] = [];
+	if (resultLimitReached) {
+		notices.push(`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`);
+		details.resultLimitReached = effectiveLimit;
+	}
+	if (truncation.truncated) {
+		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+		details.truncation = truncation;
+	}
+	if (notices.length > 0) {
+		resultOutput += `\n\n[${notices.join(". ")}]`;
+	}
+	return {
+		content: [{ type: "text" as const, text: resultOutput }],
+		details: Object.keys(details).length > 0 ? details : undefined,
+	};
+}
+
 export function createFindToolDefinition(
 	cwd: string,
 	options?: FindToolOptions,
@@ -190,10 +214,32 @@ export function createFindToolDefinition(
 							return;
 						}
 
+						if (!(await ops.exists(searchPath))) {
+							reject(new Error(`Path not found: ${searchPath}`));
+							return;
+						}
+
 						// Default implementation uses fd.
 						const fdPath = await ensureTool("fd", true);
 						if (!fdPath) {
-							reject(new Error("fd is not available and could not be downloaded"));
+							const fallbackResults = globSync(pattern, {
+								cwd: searchPath,
+								absolute: false,
+								dot: true,
+								nodir: true,
+								ignore: ["**/node_modules/**", "**/.git/**"],
+							})
+								.map((match) => toPosixPath(match))
+								.slice(0, effectiveLimit);
+							signal?.removeEventListener("abort", onAbort);
+							if (fallbackResults.length === 0) {
+								resolve({
+									content: [{ type: "text", text: "No files found matching pattern" }],
+									details: undefined,
+								});
+								return;
+							}
+							resolve(buildFindResponse(fallbackResults, effectiveLimit));
 							return;
 						}
 
@@ -226,7 +272,20 @@ export function createFindToolDefinition(
 						const result = spawnSync(fdPath, args, { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
 						signal?.removeEventListener("abort", onAbort);
 						if (result.error) {
-							reject(new Error(`Failed to run fd: ${result.error.message}`));
+							const fallbackResults = globSync(pattern, {
+								cwd: searchPath,
+								absolute: false,
+								dot: true,
+								nodir: true,
+								ignore: ["**/node_modules/**", "**/.git/**"],
+							})
+								.map((match) => toPosixPath(match))
+								.slice(0, effectiveLimit);
+							if (fallbackResults.length === 0) {
+								reject(new Error(`Failed to run fd: ${result.error.message}`));
+								return;
+							}
+							resolve(buildFindResponse(fallbackResults, effectiveLimit));
 							return;
 						}
 
@@ -262,29 +321,7 @@ export function createFindToolDefinition(
 							relativized.push(toPosixPath(relativePath));
 						}
 
-						const resultLimitReached = relativized.length >= effectiveLimit;
-						const rawOutput = relativized.join("\n");
-						const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-						let resultOutput = truncation.content;
-						const details: FindToolDetails = {};
-						const notices: string[] = [];
-						if (resultLimitReached) {
-							notices.push(
-								`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
-							);
-							details.resultLimitReached = effectiveLimit;
-						}
-						if (truncation.truncated) {
-							notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-							details.truncation = truncation;
-						}
-						if (notices.length > 0) {
-							resultOutput += `\n\n[${notices.join(". ")}]`;
-						}
-						resolve({
-							content: [{ type: "text", text: resultOutput }],
-							details: Object.keys(details).length > 0 ? details : undefined,
-						});
+						resolve(buildFindResponse(relativized, effectiveLimit));
 					} catch (e: any) {
 						signal?.removeEventListener("abort", onAbort);
 						reject(e);

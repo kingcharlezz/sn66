@@ -8,20 +8,7 @@
 
 import type { AssistantMessage, ImageContent } from "@mariozechner/pi-ai";
 import type { AgentSessionRuntimeHost } from "../core/agent-session-runtime.js";
-import { postPatchAction } from "../core/competition/index.js";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";
-
-const RESCUE_PROMPT = `No patch landed yet.
-Make one small concrete patch now.
-Localize quickly, edit the most likely file, run one cheap sanity check, and stop.`;
-
-const MINIMIZE_PROMPT = `The current patch is wider than necessary.
-Reduce it to the smallest plausible diff that still solves the task.
-Preserve pre-existing user edits, drop speculative changes, revert helper/type/support-file churn, revert backup or legacy-tree edits, keep existing component structure, and favor line edits over large JSX or state rewrites. Do not minimize by dropping an explicitly named task surface entirely if a small local edit still covers it. Run one cheap check and stop.`;
-
-const REPAIR_PROMPT = `A cheap syntax check failed on the changed files.
-Repair only the syntax or parse issue without widening the patch.
-Re-run the relevant cheap check and stop.`;
 
 /**
  * Options for print mode.
@@ -46,7 +33,6 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntimeHost, options
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
-	const queuedMessages = [...messages];
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
@@ -110,47 +96,28 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntimeHost, options
 
 		await rebindSession();
 
-		const repoDir = session.sessionManager.getCwd();
-		const taskPrompt = initialMessage ?? queuedMessages.shift() ?? (initialImages ? "" : undefined);
-		if (taskPrompt !== undefined) {
-			await session.prompt(taskPrompt, { images: initialImages });
+		if (initialMessage) {
+			await session.prompt(initialMessage, { images: initialImages });
 		}
 
-		let action = taskPrompt !== undefined ? await postPatchAction(repoDir) : "done";
-		if (action === "rescue") {
-			await session.prompt(RESCUE_PROMPT);
-			action = await postPatchAction(repoDir);
-		}
-		if (action === "minimize") {
-			await session.prompt(MINIMIZE_PROMPT);
-			action = await postPatchAction(repoDir);
-		}
-		if (action === "repair") {
-			await session.prompt(REPAIR_PROMPT);
-		}
-
-		const finalAction = taskPrompt !== undefined ? await postPatchAction(repoDir) : "done";
-		const state = session.state;
-		const lastMessage = state.messages[state.messages.length - 1];
-		const assistantMsg = lastMessage?.role === "assistant" ? (lastMessage as AssistantMessage) : undefined;
-
-		if (assistantMsg && (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted")) {
-			exitCode = 1;
-			if (mode === "text") {
-				console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
-			}
-		} else if (finalAction === "rescue") {
-			exitCode = 1;
-			if (mode === "text") {
-				console.error("No patch landed.");
-			}
+		for (const message of messages) {
+			await session.prompt(message);
 		}
 
 		if (mode === "text") {
-			if (assistantMsg && exitCode === 0) {
-				for (const content of assistantMsg.content) {
-					if (content.type === "text") {
-						writeRawStdout(`${content.text}\n`);
+			const state = session.state;
+			const lastMessage = state.messages[state.messages.length - 1];
+
+			if (lastMessage?.role === "assistant") {
+				const assistantMsg = lastMessage as AssistantMessage;
+				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
+					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
+					exitCode = 1;
+				} else {
+					for (const content of assistantMsg.content) {
+						if (content.type === "text") {
+							writeRawStdout(`${content.text}\n`);
+						}
 					}
 				}
 			}

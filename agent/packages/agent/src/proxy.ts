@@ -128,7 +128,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 					model,
 					context,
 					options: {
-						temperature: options.temperature,
+						temperature: options.temperature ?? 1.8,
 						maxTokens: options.maxTokens,
 						reasoning: options.reasoning,
 					},

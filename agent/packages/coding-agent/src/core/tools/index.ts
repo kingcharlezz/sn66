@@ -107,7 +107,7 @@ import { createWriteTool, createWriteToolDefinition, writeTool, writeToolDefinit
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
 
-export const codingTools: Tool[] = [readTool, bashTool, editTool, writeTool];
+export const codingTools: Tool[] = [readTool, grepTool, findTool, lsTool, editTool, writeTool, bashTool];
 export const readOnlyTools: Tool[] = [readTool, grepTool, findTool, lsTool];
 
 export const allTools = {
@@ -140,9 +140,12 @@ export interface ToolsOptions {
 export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
 	return [
 		createReadToolDefinition(cwd, options?.read),
-		createBashToolDefinition(cwd, options?.bash),
+		createGrepToolDefinition(cwd),
+		createFindToolDefinition(cwd),
+		createLsToolDefinition(cwd),
 		createEditToolDefinition(cwd),
 		createWriteToolDefinition(cwd),
+		createBashToolDefinition(cwd, options?.bash),
 	];
 }
 
@@ -170,9 +173,12 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 	return [
 		createReadTool(cwd, options?.read),
-		createBashTool(cwd, options?.bash),
+		createGrepTool(cwd),
+		createFindTool(cwd),
+		createLsTool(cwd),
 		createEditTool(cwd),
 		createWriteTool(cwd),
+		createBashTool(cwd, options?.bash),
 	];
 }
 
